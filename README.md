@@ -1,6 +1,6 @@
 # care-facilities
 
-Given a US zipcode, `care-facilities` finds nearby elder-care facilities
+Given a US zipcode, `care-facilities-finder` finds nearby elder-care facilities
 (nursing homes and assisted living communities) and returns a ranked table
 enriched with:
 
@@ -61,34 +61,6 @@ geocoded individually (and then cached for next time -- repeat searches in
 the same state get progressively faster). The UI's loading state says this
 up front rather than looking hung.
 
-## Deploying on Render (public link + Basic Auth)
-
-Credentials never go in the GitHub repo. They live only as environment
-variables on Render.
-
-1. Push this repo to GitHub (public is fine).
-2. In [Render](https://render.com), **New → Blueprint** and point it at the
-   repo (uses `render.yaml`), **or** **New → Web Service** and select
-   Docker.
-3. In the service **Environment** tab, set:
-   - `APP_USERNAME` — pick a username for your one user
-   - `APP_PASSWORD` — a strong password
-   (`REDIS_URL` is set automatically from the Key Value instance in
-   `render.yaml`; you do not paste it yourself.)
-4. Deploy. Render gives you an `https://….onrender.com` URL.
-5. Share that URL with your user, and send the username/password **separately**
-   (text/email) — not inside the URL.
-
-When both env vars are set, the browser prompts for login on every page
-except `/health`. `/search` is also rate-limited (20 requests/hour per IP).
-
-**Caveat:** cold searches can take a long time (geocoding). Render free
-instances sleep after inactivity and have relatively short HTTP timeouts, so
-the first search after a sleep may need a retry. The free Redis-compatible
-Key Value cache survives web-service sleep cycles (unlike the local disk
-cache), so repeat searches warm up much faster. A paid starter web instance
-is more reliable if timeouts become annoying.
-
 ## Running tests
 
 ```bash
@@ -108,19 +80,15 @@ pytest tests/test_api.py -v
   ZIP-centroid fallback when an exact address match isn't found).
 - **Stengel assisted-living dataset**: best-effort bed-count enrichment for
   ALFs, joined by fuzzy name/address match.
-
-**Structural limitation, not a bug:** assisted living facilities have no
-federal CMS star rating and no ACO (Accountable Care Organization)
-affiliation. CMS star ratings and ACOs are Medicare/SNF-specific concepts
-that simply do not exist for ALFs under current US elder-care regulation.
-Both the API and the UI always show these fields as `null` / "N/A" for ALF
-rows -- never a fabricated or guessed value (see the docstring in
-`src/care_facilities/schema.py` for the full guardrail rationale).
-
-**ACO matching is best-effort, name-based, and low-recall by design.** The
+- **Lack of CMS ratings in some records**: assisted living facilities have no
+  federal CMS star rating and no ACO (Accountable Care Organization)
+  affiliation. CMS star ratings and ACOs are Medicare/SNF-specific concepts
+  that simply do not exist for ALFs under current US elder-care regulation.
+  Both the API and the UI always show these fields as `null` / "N/A" for ALF
+  rows -- never a fabricated or guessed value (see the docstring in `src/care_facilities/schema.py` for the full guardrail rationale).
+- **ACO matching is best-effort, name-based, and low-recall by design.** The
 CMS "ACO SNF Affiliates" dataset has no CCN/NPI join key, only a free-text
 legal-business-name column, so `aco_match.py` fuzzy-matches SNF names
 against it with a deliberately high similarity cutoff (0.87). It would
 rather under-match (report no affiliation) than over-match (report a wrong
-one), so seeing `affiliated_aco: null` for most SNFs is expected and normal,
-not a sign something is broken.
+one), so seeing `affiliated_aco: null` for most SNFs is expected and normal
