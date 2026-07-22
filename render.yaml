@@ -4,7 +4,7 @@
 # https://render.com/docs/blueprint-spec
 services:
   - type: web
-    name: care-facilities
+    name: care-facilities-finder
     runtime: docker
     plan: free
     healthCheckPath: /health
@@ -15,12 +15,12 @@ services:
         sync: false
       - key: REDIS_URL
         fromService:
-          name: care-facilities-cache
+          name: care-facilities-finder-cache
           type: keyvalue
           property: connectionString
 
   - type: keyvalue
-    name: care-facilities-cache
+    name: care-facilities-finder-cache
     plan: free
     # Evict oldest keys under memory pressure -- correct for a pure cache.
     maxmemoryPolicy: allkeys-lru
