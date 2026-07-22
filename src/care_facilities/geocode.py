@@ -95,7 +95,7 @@ def geocode_address(
                     "benchmark": "Public_AR_Current",
                     "format": "json",
                 },
-                timeout=10.0,
+                timeout=3.0,
             )
             response.raise_for_status()
             return response.json()

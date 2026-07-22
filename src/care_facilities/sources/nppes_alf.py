@@ -183,30 +183,68 @@ def _normalize_zip(postal_code: str | None) -> str:
     return digits[:5]
 
 
-def geocode_alf_facilities(facilities: list[dict]) -> list[dict]:
-    """Fill in latitude/longitude for each facility via the Census geocoder.
+def prefilter_by_zip_centroid(
+    facilities: list[dict],
+    origin_lat: float,
+    origin_lon: float,
+    radius_miles: float,
+    buffer_miles: float = 15.0,
+) -> list[dict]:
+    """Drop facilities whose ZIP centroid is far outside the search radius.
 
-    Falls back to a ZIP-centroid lookup (`geocode.zip_to_latlng`) when the
-    Census address geocoder finds no match, marking `geocode_precision` as
-    "zip_centroid" in that case (vs "address" on success).
-
-    Intentionally not wrapped in `cached_call` at the batch level --
-    `geocode_address` / `zip_to_latlng` already cache per-address/per-zip,
-    so batching here would only prevent incremental reuse.
+    Address-level Census geocoding is slow (and rate-limited); doing it for
+    every ALF in a large state makes a search take many minutes. ZIP centroids
+    from `pgeocode` are local/instant, so we keep only facilities whose ZIP is
+    within `radius_miles + buffer_miles` of the origin (buffer covers ZIP
+    diameter + geocode noise). Facilities with an unresolvable ZIP are kept
+    so we don't silently drop them.
     """
+    limit = float(radius_miles) + float(buffer_miles)
+    kept: list[dict] = []
     for facility in facilities:
-        coords = geocode.geocode_address(
-            street=facility["address"],
-            city=facility["city"],
-            state=facility["state"],
-            zipcode=facility["zip"],
-        )
-        if coords is not None:
-            facility["latitude"], facility["longitude"] = coords
-            facility["geocode_precision"] = "address"
+        zipcode = facility.get("zip") or ""
+        centroid = geocode.zip_to_latlng(zipcode) if zipcode else None
+        if centroid is None:
+            kept.append(facility)
             continue
+        distance = geocode.haversine_miles(
+            origin_lat, origin_lon, centroid[0], centroid[1]
+        )
+        if distance <= limit:
+            kept.append(facility)
+    return kept
 
-        fallback = geocode.zip_to_latlng(facility["zip"])
+
+def geocode_alf_facilities(facilities: list[dict]) -> list[dict]:
+    """Fill in latitude/longitude for each facility.
+
+    Strategy (optimized for interactive search latency):
+    1. Immediately assign a ZIP-centroid coordinate (local, instant) so every
+       facility can be distance-filtered even if Census is slow/down.
+    2. Best-effort upgrade to street-level Census geocodes in a small thread
+       pool with a short per-request timeout. Failures keep the ZIP centroid
+       and mark ``geocode_precision`` as ``zip_centroid``.
+
+    Emits progress events via `care_facilities.progress` when a callback is
+    installed (UI streaming); no-op otherwise.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from .. import progress
+
+    total = len(facilities)
+    if total == 0:
+        return facilities
+
+    # Phase 1: ZIP centroids (instant).
+    progress.emit(
+        "geocode_alf",
+        f"Assigning ZIP locations for {total} assisted-living facilit(ies)…",
+        current=0,
+        total=total,
+    )
+    for facility in facilities:
+        fallback = geocode.zip_to_latlng(facility.get("zip") or "")
         if fallback is not None:
             facility["latitude"], facility["longitude"] = fallback
             facility["geocode_precision"] = "zip_centroid"
@@ -214,6 +252,43 @@ def geocode_alf_facilities(facilities: list[dict]) -> list[dict]:
             facility["latitude"] = None
             facility["longitude"] = None
             facility["geocode_precision"] = None
+
+    # Phase 2: parallel Census upgrades (best-effort).
+    workers = min(8, total)
+
+    def _try_address(index: int, facility: dict) -> tuple[int, tuple[float, float] | None]:
+        coords = geocode.geocode_address(
+            street=facility["address"],
+            city=facility["city"],
+            state=facility["state"],
+            zipcode=facility["zip"],
+        )
+        return index, coords
+
+    done = 0
+    progress.emit(
+        "geocode_alf",
+        f"Refining addresses via Census ({done}/{total})…",
+        current=done,
+        total=total,
+    )
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_try_address, i, f): i for i, f in enumerate(facilities)
+        }
+        for future in as_completed(futures):
+            index, coords = future.result()
+            done += 1
+            if coords is not None:
+                facilities[index]["latitude"], facilities[index]["longitude"] = coords
+                facilities[index]["geocode_precision"] = "address"
+            if done == 1 or done == total or done % 5 == 0:
+                progress.emit(
+                    "geocode_alf",
+                    f"Refining addresses via Census ({done}/{total})…",
+                    current=done,
+                    total=total,
+                )
 
     return facilities
 

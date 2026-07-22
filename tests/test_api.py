@@ -95,11 +95,15 @@ def test_health(client):
 def test_search_valid_zipcode_returns_expected_shape(client, monkeypatch):
     facilities = [_snf_facility(), _alf_facility()]
 
-    def _fake_run(zipcode, radius_miles=None):
+    def _fake_detailed(zipcode, radius_miles=None, on_progress=None):
         assert zipcode == "94404"
-        return facilities
+        return {
+            "results": facilities,
+            "errors": [],
+            "radius_miles": radius_miles if radius_miles is not None else 25,
+        }
 
-    monkeypatch.setattr(api_main.pipeline, "run", _fake_run)
+    monkeypatch.setattr(api_main.pipeline, "run_detailed", _fake_detailed)
 
     resp = client.post("/search", json={"zipcode": "94404", "radius_miles": 15})
     assert resp.status_code == 200
@@ -130,12 +134,12 @@ def test_search_valid_zipcode_returns_expected_shape(client, monkeypatch):
 def test_search_uses_default_radius_when_omitted(client, monkeypatch):
     captured = {}
 
-    def _fake_run(zipcode, radius_miles=None):
+    def _fake_detailed(zipcode, radius_miles=None, on_progress=None):
         captured["zipcode"] = zipcode
         captured["radius_miles"] = radius_miles
-        return []
+        return {"results": [], "errors": [], "radius_miles": radius_miles or 25}
 
-    monkeypatch.setattr(api_main.pipeline, "run", _fake_run)
+    monkeypatch.setattr(api_main.pipeline, "run_detailed", _fake_detailed)
 
     resp = client.post("/search", json={"zipcode": "94404"})
     assert resp.status_code == 200
@@ -152,10 +156,10 @@ def test_search_invalid_zipcode_returns_422(client, bad_zip):
 
 
 def test_search_pipeline_exception_returns_clean_json_error(client, monkeypatch):
-    def _raise(zipcode, radius_miles=None):
+    def _raise(zipcode, radius_miles=None, on_progress=None):
         raise RuntimeError("boom: network unreachable")
 
-    monkeypatch.setattr(api_main.pipeline, "run", _raise)
+    monkeypatch.setattr(api_main.pipeline, "run_detailed", _raise)
 
     resp = client.post("/search", json={"zipcode": "94404"})
     assert resp.status_code == 200
@@ -193,13 +197,45 @@ def test_search_rejects_wrong_password(auth_client):
 
 
 def test_search_accepts_valid_credentials(auth_client, monkeypatch):
-    monkeypatch.setattr(api_main.pipeline, "run", lambda zipcode, radius_miles=None: [])
+    monkeypatch.setattr(
+        api_main.pipeline,
+        "run_detailed",
+        lambda zipcode, radius_miles=None, on_progress=None: {
+            "results": [],
+            "errors": [],
+            "radius_miles": radius_miles or 25,
+        },
+    )
     headers = _basic_auth_header("demo", "s3cret")
     resp = auth_client.post(
         "/search", json={"zipcode": "94404"}, headers=headers
     )
     assert resp.status_code == 200
     assert resp.json()["count"] == 0
+
+
+def test_search_stream_emits_progress_and_done(client, monkeypatch):
+    def _fake_detailed(zipcode, radius_miles=None, on_progress=None):
+        if on_progress:
+            on_progress({"stage": "resolve_location", "message": "Resolving…"})
+        return {
+            "results": [_snf_facility()],
+            "errors": [],
+            "radius_miles": radius_miles or 25,
+        }
+
+    monkeypatch.setattr(api_main.pipeline, "run_detailed", _fake_detailed)
+
+    with client.stream(
+        "POST", "/search/stream", json={"zipcode": "94404", "radius_miles": 10}
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    assert "data: " in body
+    assert "Resolving" in body
+    assert '"stage": "done"' in body
+    assert "Sunny Acres" in body
 
 
 def test_static_requires_auth_when_enabled(auth_client):

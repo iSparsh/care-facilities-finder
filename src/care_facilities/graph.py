@@ -31,7 +31,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from . import aco_match, geocode
+from . import aco_match, geocode, progress
 from .schema import Facility
 from .sources import cms_snf, nppes_alf, stengel
 
@@ -60,18 +60,26 @@ def resolve_location(state: PipelineState) -> dict[str, Any]:
     short-circuits the run instead of crashing downstream nodes."""
     errors = list(state.get("errors") or [])
     zipcode = state["zipcode"]
+    progress.emit("resolve_location", f"Resolving zipcode {zipcode}…")
 
     latlng = geocode.zip_to_latlng(zipcode)
     resolved_state = geocode.zip_to_state(zipcode)
 
     if latlng is None or resolved_state is None:
-        errors.append(
+        msg = (
             f"Could not resolve zipcode {zipcode!r} to a location and/or state; "
             "no facilities can be searched."
         )
+        errors.append(msg)
+        progress.emit("resolve_location", msg, level="error")
         return {"errors": errors}
 
     lat, lon = latlng
+    progress.emit(
+        "resolve_location",
+        f"Located {zipcode} in {resolved_state}.",
+        state=resolved_state,
+    )
     return {
         "origin_lat": lat,
         "origin_lon": lon,
@@ -104,14 +112,22 @@ def short_circuit(state: PipelineState) -> dict[str, Any]:
 
 def fetch_snf(state: PipelineState) -> dict[str, Any]:
     errors = list(state.get("errors") or [])
+    progress.emit("fetch_snf", f"Fetching nursing homes in {state['state']}…")
     try:
         facilities = cms_snf.fetch_snf_facilities(state["state"])
         filtered = cms_snf.filter_by_radius(
             facilities, state["origin_lat"], state["origin_lon"], state["radius_miles"]
         )
+        progress.emit(
+            "fetch_snf",
+            f"Found {len(filtered)} nursing home(s) within {state['radius_miles']} mi.",
+            count=len(filtered),
+        )
         return {"snf_raw": filtered}
     except Exception as exc:  # noqa: BLE001 - defensive, must not crash the run
-        errors.append(f"fetch_snf failed: {exc}")
+        msg = f"fetch_snf failed: {exc}"
+        errors.append(msg)
+        progress.emit("fetch_snf", msg, level="error")
         return {"snf_raw": [], "errors": errors}
 
 
@@ -140,16 +156,44 @@ def _dedupe_by_npi(facilities: list[dict]) -> list[dict]:
 
 def fetch_alf(state: PipelineState) -> dict[str, Any]:
     errors = list(state.get("errors") or [])
+    progress.emit(
+        "fetch_alf", f"Fetching assisted-living facilities in {state['state']}…"
+    )
     try:
         facilities = nppes_alf.fetch_alf_facilities(state["state"])
         facilities = _dedupe_by_npi(facilities)
+        progress.emit(
+            "fetch_alf",
+            f"Loaded {len(facilities)} assisted-living record(s); narrowing by ZIP…",
+            count=len(facilities),
+        )
+        # Cheap ZIP-centroid prefilter so we don't Census-geocode an entire state.
+        facilities = nppes_alf.prefilter_by_zip_centroid(
+            facilities,
+            state["origin_lat"],
+            state["origin_lon"],
+            state["radius_miles"],
+        )
+        progress.emit(
+            "fetch_alf",
+            f"{len(facilities)} candidate(s) near the search area; geocoding addresses…",
+            count=len(facilities),
+        )
         facilities = nppes_alf.geocode_alf_facilities(facilities)
         filtered = nppes_alf.filter_by_radius(
             facilities, state["origin_lat"], state["origin_lon"], state["radius_miles"]
         )
+        progress.emit(
+            "fetch_alf",
+            f"Found {len(filtered)} assisted-living facilit(ies) within "
+            f"{state['radius_miles']} mi.",
+            count=len(filtered),
+        )
         return {"alf_raw": filtered}
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"fetch_alf failed: {exc}")
+        msg = f"fetch_alf failed: {exc}"
+        errors.append(msg)
+        progress.emit("fetch_alf", msg, level="error")
         return {"alf_raw": [], "errors": errors}
 
 
@@ -164,20 +208,25 @@ def enrich_snf(state: PipelineState) -> dict[str, Any]:
     if not facilities:
         return {"snf_enriched": []}
 
+    progress.emit("enrich_snf", "Enriching nursing homes (ownership + ACO)…")
     ccns = [f["ccn"] for f in facilities if f.get("ccn")]
     try:
         ownership_by_ccn = cms_snf.fetch_ownership(ccns)
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"enrich_snf: fetch_ownership failed ({exc}); ownership omitted.")
+        msg = f"enrich_snf: fetch_ownership failed ({exc}); ownership omitted."
+        errors.append(msg)
+        progress.emit("enrich_snf", msg, level="error")
         ownership_by_ccn = {}
 
     try:
         matcher = aco_match.load_aco_matcher()
     except Exception as exc:  # noqa: BLE001
-        errors.append(
+        msg = (
             f"enrich_snf: ACO dataset fetch failed ({exc}); affiliated_aco left as None "
             "for all facilities (never guessed)."
         )
+        errors.append(msg)
+        progress.emit("enrich_snf", msg, level="error")
         matcher = None
 
     enriched = []
@@ -189,6 +238,7 @@ def enrich_snf(state: PipelineState) -> dict[str, Any]:
         )
         enriched.append(facility)
 
+    progress.emit("enrich_snf", f"Enriched {len(enriched)} nursing home(s).")
     return {"snf_enriched": enriched, "errors": errors}
 
 
@@ -202,6 +252,7 @@ def enrich_alf(state: PipelineState) -> dict[str, Any]:
     if not facilities:
         return {"alf_enriched": []}
 
+    progress.emit("enrich_alf", "Enriching assisted-living bed counts…")
     df = stengel.load_stengel_dataset()  # loaded once, reused for every facility
 
     enriched = []
@@ -210,6 +261,7 @@ def enrich_alf(state: PipelineState) -> dict[str, Any]:
         facility["bed_count"] = stengel.match_bed_count(facility, df)
         enriched.append(facility)
 
+    progress.emit("enrich_alf", f"Enriched {len(enriched)} assisted-living facilit(ies).")
     return {"alf_enriched": enriched}
 
 
@@ -300,10 +352,17 @@ def reconcile(state: PipelineState) -> dict[str, Any]:
     alf_enriched = state.get("alf_enriched") or []
     errors = list(state.get("errors") or [])
 
+    progress.emit("reconcile", "Merging duplicate SNF/ALF entries…")
     facilities = [Facility.from_snf_dict(f) for f in snf_enriched] + [
         Facility.from_alf_dict(f) for f in alf_enriched
     ]
+    before = len(facilities)
     facilities = _dedupe_facilities(facilities)
+    progress.emit(
+        "reconcile",
+        f"Reconciled {before} → {len(facilities)} facilit(ies).",
+        count=len(facilities),
+    )
 
     return {"facilities": facilities, "errors": errors}
 
@@ -321,7 +380,9 @@ def _rank_key(facility: Facility) -> tuple[float, float]:
 
 def rank(state: PipelineState) -> dict[str, Any]:
     facilities = state.get("facilities") or []
+    progress.emit("rank", "Ranking results…")
     ranked = sorted(facilities, key=_rank_key)
+    progress.emit("rank", f"Ready — {len(ranked)} facilit(ies).", count=len(ranked))
     return {"results": ranked}
 
 

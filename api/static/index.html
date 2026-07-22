@@ -138,9 +138,39 @@
 
     #status.loading {
       color: var(--muted);
+    }
+
+    #status.loading .status-head {
       display: flex;
       align-items: center;
       gap: 0.6rem;
+      margin-bottom: 0.6rem;
+    }
+
+    #progress-log {
+      list-style: none;
+      margin: 0;
+      padding: 0.75rem 1rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 220px;
+      overflow-y: auto;
+      font-size: 0.88rem;
+    }
+
+    #progress-log li {
+      padding: 0.2rem 0;
+      color: var(--muted);
+    }
+
+    #progress-log li.current {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    #progress-log li.error {
+      color: var(--error-text);
     }
 
     .spinner {
@@ -150,6 +180,7 @@
       border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
     }
 
     @keyframes spin {
@@ -417,9 +448,8 @@
       </div>
       <button type="submit" id="search-btn">Search</button>
       <div class="hint">
-        First-time searches in a new area can take several minutes (assisted-living
-        addresses are geocoded one at a time and cached for next time). Repeat
-        searches in the same state are much faster.
+        Searches show live progress. The first search in a new area is slower
+        (assisted-living addresses are geocoded and cached); repeats are faster.
       </div>
     </form>
 
@@ -801,6 +831,51 @@
       statusEl.innerHTML = message;
     }
 
+    function beginProgress() {
+      setStatus(
+        `<div class="status-head"><span class="spinner"></span> Searching…</div>
+         <ul id="progress-log"></ul>`,
+        "loading"
+      );
+      return document.getElementById("progress-log");
+    }
+
+    function appendProgress(logEl, event) {
+      if (!logEl || !event || !event.message) return;
+      const li = document.createElement("li");
+      li.textContent = event.message;
+      if (event.level === "error") li.className = "error";
+      const prev = logEl.querySelector("li.current");
+      if (prev && prev.className === "current") prev.classList.remove("current");
+      if (event.level !== "error") li.classList.add("current");
+      logEl.appendChild(li);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function readSearchStream(resp, onEvent) {
+      if (!resp.body) {
+        throw new Error("Browser could not read the search stream.");
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() || "";
+        for (const chunk of chunks) {
+          const dataLine = chunk
+            .split("\n")
+            .find((line) => line.startsWith("data: "));
+          if (!dataLine) continue;
+          const payload = JSON.parse(dataLine.slice(6));
+          onEvent(payload);
+        }
+      }
+    }
+
     function resetFilters() {
       filterState = { text: "", type: "", minRating: "", maxDistance: "" };
       filterTextInput.value = "";
@@ -863,41 +938,54 @@
 
       searchBtn.disabled = true;
       resultsWrap.style.display = "none";
-      setStatus(
-        '<span class="spinner"></span> Searching... this may take a while on a cold cache (assisted-living geocoding can take minutes the first time in a new area).',
-        "loading"
-      );
+      const progressLog = beginProgress();
 
       try {
-        const resp = await fetch("/search", {
+        const resp = await fetch("/search/stream", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
           body: JSON.stringify({ zipcode, radius_miles: radius }),
         });
 
-        let body;
-        try {
-          body = await resp.json();
-        } catch (parseErr) {
-          throw new Error(`Server returned an unreadable response (HTTP ${resp.status}).`);
-        }
-
         if (!resp.ok) {
-          const detail =
-            (body && body.detail && (Array.isArray(body.detail)
-              ? body.detail.map((d) => d.msg).join("; ")
-              : String(body.detail))) ||
-            `HTTP ${resp.status}`;
+          let detail = `HTTP ${resp.status}`;
+          try {
+            const errBody = await resp.json();
+            if (errBody && errBody.detail) {
+              detail = Array.isArray(errBody.detail)
+                ? errBody.detail.map((d) => d.msg).join("; ")
+                : String(errBody.detail);
+            }
+          } catch (_) { /* ignore */ }
           throw new Error(detail);
         }
 
-        if (body.errors && body.errors.length) {
-          // Pipeline-level errors (e.g. search failed): show them, but still
-          // render whatever results (possibly none) came back.
-          setStatus(escapeHtml(body.errors.join(" ")), "error");
-          if (body.results && body.results.length) {
-            showResults(body.results);
+        let finalEvent = null;
+        await readSearchStream(resp, (event) => {
+          if (event.stage === "done" || event.stage === "error") {
+            finalEvent = event;
+            return;
+          }
+          appendProgress(progressLog, event);
+        });
+
+        if (!finalEvent) {
+          throw new Error("Search ended without a result. Please try again.");
+        }
+
+        if (finalEvent.stage === "error") {
+          setStatus(
+            escapeHtml(finalEvent.message || "Search failed. Please try again."),
+            "error"
+          );
+          return;
+        }
+
+        if (finalEvent.errors && finalEvent.errors.length) {
+          setStatus(escapeHtml(finalEvent.errors.join(" ")), "error");
+          if (finalEvent.results && finalEvent.results.length) {
+            showResults(finalEvent.results);
           } else {
             currentResults = [];
             renderAll();
@@ -905,7 +993,7 @@
           return;
         }
 
-        showResults(body.results || []);
+        showResults(finalEvent.results || []);
       } catch (err) {
         resultsWrap.style.display = "none";
         setStatus(

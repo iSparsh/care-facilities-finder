@@ -1,38 +1,37 @@
 """FastAPI backend for Stage 4: a thin HTTP wrapper around the Stage 3
-`care_facilities.pipeline.run` entrypoint, plus a static single-page
-frontend.
+`care_facilities.pipeline` entrypoint, plus a static single-page frontend.
 
 Endpoints:
-    GET  /health   -- liveness check (unguarded; used by the host).
-    POST /search   -- {zipcode, radius_miles} -> ranked facility list + metadata.
-    GET  /          -- serves api/static/index.html (and other static assets).
+    GET  /health         -- liveness check (unguarded; used by the host).
+    POST /search         -- {zipcode, radius_miles} -> ranked facility list.
+    POST /search/stream  -- same search as SSE (progress events + final result).
+    GET  /               -- serves api/static/index.html (and other static assets).
 
 When `APP_USERNAME` and `APP_PASSWORD` are both set, every request except
-`/health` is gated behind HTTP Basic Auth. Rate limiting on `/search`
+`/health` is gated behind HTTP Basic Auth. Rate limiting on `/search*`
 caps abuse of the outbound CMS/NPPES/Census calls.
 
-`pipeline.run` performs real, potentially slow (cold-cache) network calls
-(CMS, NPPES, Census geocoder), so it is always executed in a worker thread
-(`starlette.concurrency.run_in_threadpool`) rather than directly on the
-FastAPI event loop, so the server stays responsive to other requests (e.g.
-`/health`) while a search is in flight.
+`pipeline.run` / `run_detailed` perform real, potentially slow (cold-cache)
+network calls, so they always run in a worker thread
+(`starlette.concurrency.run_in_threadpool`) rather than on the FastAPI
+event loop.
 
-Honesty guardrail carried over from Stage 3: this module never invents or
-alters facility data -- it only serializes whatever `Facility` objects
-`pipeline.run` returns (via `.model_dump()`), so `None` fields (e.g.
-`cms_overall_rating`/`affiliated_aco` for Assisted Living facilities) pass
-through as JSON `null`, to be rendered as "N/A" by the frontend -- never
-fabricated, never silently dropped.
+Honesty guardrail: this module never invents facility data -- it only
+serializes whatever `Facility` objects the pipeline returns.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import re
 import secrets
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -106,6 +105,18 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         )
 
 
+def _serialize_search_payload(
+    zipcode: str, radius: float, results: list, errors: list[str]
+) -> dict[str, Any]:
+    return {
+        "zipcode": zipcode,
+        "radius_miles": radius,
+        "count": len(results),
+        "results": [facility.model_dump() for facility in results],
+        "errors": errors,
+    }
+
+
 limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 app = FastAPI(title="Care Facilities Finder API")
@@ -139,23 +150,91 @@ async def search(request: Request, body: SearchRequest) -> dict:
     )
 
     try:
-        results = await run_in_threadpool(pipeline.run, body.zipcode, radius)
+        detailed = await run_in_threadpool(
+            pipeline.run_detailed, body.zipcode, radius
+        )
     except Exception:  # noqa: BLE001 - never let this become a raw 500 traceback
-        return {
-            "zipcode": body.zipcode,
-            "radius_miles": radius,
-            "count": 0,
-            "results": [],
-            "errors": ["Search failed. Please try again."],
-        }
+        return _serialize_search_payload(
+            body.zipcode, radius, [], ["Search failed. Please try again."]
+        )
 
-    return {
-        "zipcode": body.zipcode,
-        "radius_miles": radius,
-        "count": len(results),
-        "results": [facility.model_dump() for facility in results],
-        "errors": [],
-    }
+    return _serialize_search_payload(
+        body.zipcode,
+        detailed["radius_miles"],
+        detailed["results"],
+        detailed["errors"],
+    )
+
+
+@app.post("/search/stream")
+@limiter.limit(_SEARCH_RATE_LIMIT)
+async def search_stream(request: Request, body: SearchRequest) -> StreamingResponse:
+    """SSE stream: progress events, then a final `done` (or `error`) event.
+
+    Event payloads are JSON objects with at least ``stage`` and ``message``.
+    The terminal event is ``stage=done`` with the same fields as ``POST /search``,
+    or ``stage=error`` if the pipeline itself crashed.
+    """
+    radius = (
+        body.radius_miles
+        if body.radius_miles is not None
+        else float(config.DEFAULT_RADIUS_MILES)
+    )
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+    def on_progress(event: dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def _run() -> dict[str, Any]:
+        return pipeline.run_detailed(body.zipcode, radius, on_progress=on_progress)
+
+    async def event_gen():
+        task = asyncio.create_task(run_in_threadpool(_run))
+        # Drain progress while the worker runs.
+        while not task.done() or not queue.empty():
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                # Keepalive comment so proxies don't idle-close the stream.
+                yield ": keepalive\n\n"
+                continue
+            yield f"data: {json.dumps(event)}\n\n"
+
+        try:
+            detailed = await task
+        except Exception:  # noqa: BLE001
+            fail = {
+                "stage": "error",
+                "message": "Search failed. Please try again.",
+                **_serialize_search_payload(
+                    body.zipcode, radius, [], ["Search failed. Please try again."]
+                ),
+            }
+            yield f"data: {json.dumps(fail)}\n\n"
+            return
+
+        done = {
+            "stage": "done",
+            "message": f"Found {len(detailed['results'])} facilit(ies).",
+            **_serialize_search_payload(
+                body.zipcode,
+                detailed["radius_miles"],
+                detailed["results"],
+                detailed["errors"],
+            ),
+        }
+        yield f"data: {json.dumps(done)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Mounted last so it doesn't shadow the routes defined above; `html=True`
