@@ -1,0 +1,28 @@
+# Blueprint for Render. Secrets are NOT stored here -- set APP_USERNAME and
+# APP_PASSWORD in the Render dashboard when prompted (sync: false).
+# REDIS_URL is wired automatically from the Key Value instance below.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: care-facilities
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          name: care-facilities-cache
+          type: keyvalue
+          property: connectionString
+
+  - type: keyvalue
+    name: care-facilities-cache
+    plan: free
+    # Evict oldest keys under memory pressure -- correct for a pure cache.
+    maxmemoryPolicy: allkeys-lru
+    # Internal-only: web service reaches it over Render's private network.
+    ipAllowList: []

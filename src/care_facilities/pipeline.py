@@ -23,12 +23,10 @@ def run(zipcode: str, radius_miles: float | None = None) -> list[Facility]:
     """Run the full pipeline for `zipcode` and return the ranked results.
 
     `radius_miles` defaults to `config.DEFAULT_RADIUS_MILES` when omitted.
-    Never raises for "expected" failure modes (bad zipcode, network errors,
-    missing ANTHROPIC_API_KEY) -- those degrade to an empty result list or a
-    result list produced without LLM reconciliation, respectively, with
-    details recorded in the pipeline's internal `errors` list (not
-    currently surfaced here, but visible via `COMPILED_GRAPH.invoke`
-    directly if needed for debugging).
+    Never raises for "expected" failure modes (bad zipcode, network errors)
+    -- those degrade to an empty result list, with details recorded in the
+    pipeline's internal `errors` list (not currently surfaced here, but
+    visible via `COMPILED_GRAPH.invoke` directly if needed for debugging).
     """
     radius = float(radius_miles) if radius_miles is not None else float(
         config.DEFAULT_RADIUS_MILES

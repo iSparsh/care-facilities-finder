@@ -2,10 +2,12 @@
 
 `pipeline.run` is monkeypatched (in `api.main`'s namespace, where it's
 imported) so these tests are fast, deterministic, and never touch the
-network or an LLM.
+network.
 """
 
 from __future__ import annotations
+
+import base64
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,8 +68,21 @@ def _alf_facility(**overrides):
     return Facility(**defaults)
 
 
+def _basic_auth_header(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
 @pytest.fixture
 def client():
+    return TestClient(api_main.app)
+
+
+@pytest.fixture
+def auth_client(monkeypatch):
+    """Client against an app with Basic Auth enabled."""
+    monkeypatch.setattr(api_main.config, "APP_USERNAME", "demo")
+    monkeypatch.setattr(api_main.config, "APP_PASSWORD", "s3cret")
     return TestClient(api_main.app)
 
 
@@ -127,7 +142,6 @@ def test_search_uses_default_radius_when_omitted(client, monkeypatch):
     body = resp.json()
     assert body["count"] == 0
     assert body["results"] == []
-    assert captured["radius_miles"] == captured["radius_miles"]  # sanity
     assert captured["zipcode"] == "94404"
 
 
@@ -144,19 +158,12 @@ def test_search_pipeline_exception_returns_clean_json_error(client, monkeypatch)
     monkeypatch.setattr(api_main.pipeline, "run", _raise)
 
     resp = client.post("/search", json={"zipcode": "94404"})
-    # Never a raw 500 stack trace: either a clean 200 w/ errors, or a clean
-    # JSON error body. Assert whichever this implementation chose is clean.
-    assert resp.status_code in (200, 500)
+    assert resp.status_code == 200
     body = resp.json()
-    assert isinstance(body, dict)
-    if resp.status_code == 200:
-        assert body["results"] == []
-        assert body["errors"]
-        assert "boom" in body["errors"][0]
-    else:
-        # FastAPI's default error body has a "detail" key; make sure it's
-        # not a raw traceback dump either way.
-        assert "detail" in body or "errors" in body
+    assert body["results"] == []
+    assert body["errors"] == ["Search failed. Please try again."]
+    # Must not leak the internal exception message.
+    assert "boom" not in resp.text
 
 
 def test_root_serves_static_index(client):
@@ -165,3 +172,36 @@ def test_root_serves_static_index(client):
     assert "Care Facilities Finder" in resp.text
     assert 'id="filter-bar"' in resp.text
     assert "Why is there no CMS rating?" in resp.text
+
+
+def test_health_remains_open_when_auth_enabled(auth_client):
+    resp = auth_client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_search_requires_auth_when_enabled(auth_client):
+    resp = auth_client.post("/search", json={"zipcode": "94404"})
+    assert resp.status_code == 401
+    assert resp.headers.get("www-authenticate", "").startswith("Basic")
+
+
+def test_search_rejects_wrong_password(auth_client):
+    headers = _basic_auth_header("demo", "wrong")
+    resp = auth_client.post("/search", json={"zipcode": "94404"}, headers=headers)
+    assert resp.status_code == 401
+
+
+def test_search_accepts_valid_credentials(auth_client, monkeypatch):
+    monkeypatch.setattr(api_main.pipeline, "run", lambda zipcode, radius_miles=None: [])
+    headers = _basic_auth_header("demo", "s3cret")
+    resp = auth_client.post(
+        "/search", json={"zipcode": "94404"}, headers=headers
+    )
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 0
+
+
+def test_static_requires_auth_when_enabled(auth_client):
+    resp = auth_client.get("/")
+    assert resp.status_code == 401

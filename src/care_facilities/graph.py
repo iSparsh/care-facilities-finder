@@ -9,31 +9,29 @@ Pipeline shape (see module-level `build_graph()`):
 (fetch_snf/fetch_alf and enrich_snf/enrich_alf each run as independent
 parallel branches that fan back in at `reconcile`.)
 
-Every fetch/filter/enrich node is a deterministic wrapper around the
-Stage 1/2 `sources.*` functions -- no LLM involved, and each node defends
-itself with a try/except so a single flaky HTTP call degrades to an empty
-list rather than crashing the whole run.
+Every fetch/filter/enrich/reconcile node is a deterministic wrapper around
+the Stage 1/2 `sources.*` functions or plain Python -- no LLM involved, and
+each node defends itself with a try/except so a single flaky HTTP call
+degrades to an empty list rather than crashing the whole run.
 
-The one LLM-backed node is `reconcile`, which uses `ChatAnthropic` with
-structured output to (a) flag likely duplicate SNF/ALF entries (e.g.
-continuing-care communities that show up in both source datasets) and
-(b) lightly clean up display strings. If `config.ANTHROPIC_API_KEY` is
-unset, or the Anthropic call raises for any reason, `reconcile` falls back
-to a plain concatenation of the SNF + ALF facility lists (no dedup, no
-cleanup) and appends a warning to `state["errors"]` -- the pipeline is
-fully usable without an API key, just less polished.
+`reconcile` flags likely duplicate SNF/ALF entries (e.g. continuing-care
+communities that show up in both source datasets) using the same
+conservative fuzzy-name-matching approach as `aco_match.py` (difflib,
+normalized names, high similarity cutoff), combined with a matching ZIP
+code -- never an LLM call, so it's free, fast, and has no external API
+dependency. It would rather under-match (leave two entries separate) than
+over-match (silently merge two different facilities), consistent with this
+project's honesty-guardrail philosophy elsewhere.
 """
 
 from __future__ import annotations
 
-import json
+import difflib
 from typing import Any, TypedDict
 
-from langchain_anthropic import ChatAnthropic
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
 
-from . import aco_match, config, geocode
+from . import aco_match, geocode
 from .schema import Facility
 from .sources import cms_snf, nppes_alf, stengel
 
@@ -215,140 +213,85 @@ def enrich_alf(state: PipelineState) -> dict[str, Any]:
     return {"alf_enriched": enriched}
 
 
-# --- 6. reconcile (the Claude tool-calling / structured-output node) ----------
+# --- 6. reconcile (naive, deterministic dedup) --------------------------------
+
+# Same spirit as aco_match.MATCH_CUTOFF: deliberately high so we'd rather
+# leave two genuinely-different facilities separate than wrongly merge them.
+_DEDUP_NAME_CUTOFF = 0.87
 
 
-class DuplicateGroup(BaseModel):
-    """A group of facility-list indices believed to refer to the same
-    physical facility (e.g. a continuing-care community that shows up once
-    in the SNF data and once in the ALF data)."""
+def _find_duplicate_groups(facilities: list[Facility]) -> list[list[int]]:
+    """Group facility indices that look like the same physical facility.
 
-    indices: list[int] = Field(
-        description="0-based indices into the facility list that refer to the same physical facility (>= 2 entries)."
-    )
-    keep_index: int = Field(
-        description="Which of `indices` to keep as the canonical/merged entry; the rest are dropped."
-    )
+    A pair is considered a duplicate only if BOTH: (a) normalized names are
+    a close/exact fuzzy match (same cutoff style as `aco_match.py`), and
+    (b) they share a ZIP code (a cheap, reliable proxy for "same location"
+    given `Facility` carries no lat/lon of its own, only distance-to-search-
+    origin). This catches the documented case -- continuing-care
+    communities registered once in CMS (SNF) and once in NPPES (ALF) under
+    a near-identical name -- without needing any network/LLM call.
+    """
+    normalized = [aco_match.normalize_name(f.name) for f in facilities]
 
+    groups: list[list[int]] = []
+    assigned: dict[int, int] = {}  # facility index -> group index
 
-class CleanedFacility(BaseModel):
-    """A lightly-cleaned display string for one facility. Only fields that
-    actually needed a cleanup should be set; leave others as `None`."""
-
-    index: int = Field(description="0-based index into the facility list.")
-    leadership: str | None = Field(
-        default=None, description="Cleaned-up leadership/owner display string, or omit if unchanged."
-    )
-    ownership_type: str | None = Field(
-        default=None, description="Cleaned-up ownership type string, or omit if unchanged."
-    )
-    chain_name: str | None = Field(
-        default=None, description="Cleaned-up chain name string, or omit if unchanged."
-    )
-
-
-class ReconcileResult(BaseModel):
-    duplicate_groups: list[DuplicateGroup] = Field(default_factory=list)
-    cleaned: list[CleanedFacility] = Field(default_factory=list)
-
-
-def _facility_summaries(facilities: list[Facility]) -> list[dict[str, Any]]:
-    return [
-        {
-            "index": i,
-            "name": f.name,
-            "facility_type": f.facility_type,
-            "address": f.address,
-            "city": f.city,
-            "state": f.state,
-            "zip": f.zip,
-            "leadership": f.leadership,
-            "ownership_type": f.ownership_type,
-            "chain_name": f.chain_name,
-        }
-        for i, f in enumerate(facilities)
-    ]
-
-
-_RECONCILE_PROMPT_TEMPLATE = """\
-You are reconciling a list of elder-care facilities compiled from two \
-separate government data sources: CMS (skilled nursing facilities) and \
-NPPES (assisted living facilities). Some physical facilities -- especially \
-continuing-care retirement communities that operate both a nursing wing and \
-an assisted-living wing -- may appear once from each source under a similar \
-name and address.
-
-Given the JSON list of facilities below, do two things:
-
-1. Identify any groups of 2+ indices that refer to the SAME physical \
-facility (matching or very similar name AND a close/matching address). Only \
-flag genuinely confident matches -- do not group facilities just because \
-they're in the same city or have a generic name in common. For each group, \
-pick which index to keep as the canonical entry (prefer the one with more \
-complete address/leadership information).
-2. Lightly clean up the `leadership`, `ownership_type`, and `chain_name` \
-display strings for consistency and readability (fix casing, spacing, \
-stray punctuation). Do NOT invent, guess, or add any new facts -- only \
-reformat what's already there. Only include an entry in `cleaned` if you \
-are actually changing something; omit fields within it that are unchanged.
-
-Facilities:
-{facilities_json}
-"""
-
-
-def _reconcile_with_llm(facilities: list[Facility]) -> list[Facility]:
-    if not facilities:
-        return facilities
-
-    llm = ChatAnthropic(model=config.CLAUDE_MODEL)
-    structured_llm = llm.with_structured_output(ReconcileResult)
-
-    prompt = _RECONCILE_PROMPT_TEMPLATE.format(
-        facilities_json=json.dumps(_facility_summaries(facilities), indent=2)
-    )
-    result = structured_llm.invoke(prompt)
-    if not isinstance(result, ReconcileResult):
-        # with_structured_output can return a dict depending on backend/version;
-        # normalize defensively rather than assuming the type.
-        result = ReconcileResult.model_validate(result)
-
-    return _apply_reconcile_result(facilities, result)
-
-
-def _apply_reconcile_result(
-    facilities: list[Facility], result: ReconcileResult
-) -> list[Facility]:
-    facilities = list(facilities)
-
-    # Apply string cleanup. Deliberately restricted to leadership/
-    # ownership_type/chain_name -- never touches cms_overall_rating or
-    # affiliated_aco, so the honesty guardrail holds even if the LLM
-    # response tried to set those (the schema doesn't even expose them here).
-    for cleaned in result.cleaned:
-        if not (0 <= cleaned.index < len(facilities)):
+    for i in range(len(facilities)):
+        if not normalized[i] or facilities[i].zip == "":
             continue
-        update: dict[str, Any] = {}
-        if cleaned.leadership is not None:
-            update["leadership"] = cleaned.leadership
-        if cleaned.ownership_type is not None:
-            update["ownership_type"] = cleaned.ownership_type
-        if cleaned.chain_name is not None:
-            update["chain_name"] = cleaned.chain_name
-        if update:
-            facilities[cleaned.index] = facilities[cleaned.index].model_copy(
-                update=update
-            )
+        for j in range(i + 1, len(facilities)):
+            if not normalized[j] or facilities[i].zip != facilities[j].zip:
+                continue
+            close = normalized[i] == normalized[j] or difflib.SequenceMatcher(
+                None, normalized[i], normalized[j]
+            ).ratio() >= _DEDUP_NAME_CUTOFF
+            if not close:
+                continue
 
-    # Apply dedup: within each confident duplicate group, keep only keep_index.
+            gi = assigned.get(i)
+            gj = assigned.get(j)
+            if gi is not None:
+                groups[gi].append(j)
+                assigned[j] = gi
+            elif gj is not None:
+                groups[gj].append(i)
+                assigned[i] = gj
+            else:
+                groups.append([i, j])
+                assigned[i] = assigned[j] = len(groups) - 1
+
+    return groups
+
+
+def _completeness_score(facility: Facility) -> int:
+    """More non-null/non-empty informative fields = more complete. Used to
+    pick which entry in a duplicate group to keep."""
+    fields = (
+        facility.leadership,
+        facility.ownership_type,
+        facility.chain_name,
+        facility.phone,
+        facility.certified_beds,
+        facility.cms_overall_rating,
+    )
+    return sum(1 for value in fields if value not in (None, ""))
+
+
+def _dedupe_facilities(facilities: list[Facility]) -> list[Facility]:
+    groups = _find_duplicate_groups(facilities)
     drop: set[int] = set()
-    for group in result.duplicate_groups:
-        valid = [i for i in group.indices if 0 <= i < len(facilities)]
-        if len(valid) < 2:
-            continue
-        keep = group.keep_index if group.keep_index in valid else valid[0]
-        drop.update(i for i in valid if i != keep)
-
+    for group in groups:
+        # Prefer the SNF entry (carries CMS ratings/ownership -- strictly
+        # more information than the ALF side of a matched pair), then the
+        # most complete entry, as a tiebreak.
+        keep = max(
+            group,
+            key=lambda i: (
+                facilities[i].facility_type == "SNF",
+                _completeness_score(facilities[i]),
+            ),
+        )
+        drop.update(i for i in group if i != keep)
     return [f for i, f in enumerate(facilities) if i not in drop]
 
 
@@ -360,21 +303,7 @@ def reconcile(state: PipelineState) -> dict[str, Any]:
     facilities = [Facility.from_snf_dict(f) for f in snf_enriched] + [
         Facility.from_alf_dict(f) for f in alf_enriched
     ]
-
-    if not config.ANTHROPIC_API_KEY:
-        errors.append(
-            "reconcile: ANTHROPIC_API_KEY not set; skipping LLM dedup/cleanup and "
-            "using a plain concatenation of SNF + ALF results."
-        )
-        return {"facilities": facilities, "errors": errors}
-
-    try:
-        facilities = _reconcile_with_llm(facilities)
-    except Exception as exc:  # noqa: BLE001 - must never crash the pipeline
-        errors.append(
-            f"reconcile: LLM reconciliation failed ({exc}); falling back to a plain "
-            "concatenation of SNF + ALF results (no dedup/cleanup)."
-        )
+    facilities = _dedupe_facilities(facilities)
 
     return {"facilities": facilities, "errors": errors}
 

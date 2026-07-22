@@ -65,7 +65,7 @@ _CORP_SUFFIXES = {
 }
 
 
-def _normalize_name(name: str) -> str:
+def normalize_name(name: str) -> str:
     """Lowercase, strip punctuation, and drop common corporate suffixes.
 
     Mirrors the spirit of `stengel._normalize_name` (alnum/whitespace-only,
@@ -127,7 +127,7 @@ class AcoMatcher:
             if not aff_lbn:
                 continue
             aco_name = row.get("ACO_Name") or str(aff_lbn)
-            normalized = _normalize_name(aff_lbn)
+            normalized = normalize_name(aff_lbn)
             if not normalized:
                 continue
             if normalized not in self._name_to_aco:
@@ -139,7 +139,7 @@ class AcoMatcher:
         if no confident match is found. Never guesses."""
         if not facility_name:
             return None
-        normalized = _normalize_name(facility_name)
+        normalized = normalize_name(facility_name)
         if not normalized:
             return None
 

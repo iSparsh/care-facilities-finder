@@ -871,6 +871,7 @@
       try {
         const resp = await fetch("/search", {
           method: "POST",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ zipcode, radius_miles: radius }),
         });

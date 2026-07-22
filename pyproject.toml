@@ -5,12 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "care_facilities"
 version = "0.1.0"
-description = "Zipcode -> ranked elder-care facility table, orchestrated via LangGraph + Claude."
+description = "Zipcode -> ranked elder-care facility table, orchestrated via LangGraph."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "langgraph",
-    "langchain-anthropic",
     "langchain-core",
     "httpx",
     "pgeocode",
@@ -19,6 +18,8 @@ dependencies = [
     "uvicorn",
     "pydantic>=2",
     "python-dotenv",
+    "slowapi",
+    "redis",
 ]
 
 [project.optional-dependencies]

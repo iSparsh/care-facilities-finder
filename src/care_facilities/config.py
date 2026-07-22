@@ -48,11 +48,18 @@ CACHE_TTL_CMS = 7 * 24 * 3600
 CACHE_TTL_NPPES = 7 * 24 * 3600
 CACHE_TTL_GEOCODE = 90 * 24 * 3600
 
-# --- Claude / LangGraph --------------------------------------------------
+# --- App access (Basic Auth) ----------------------------------------------
+# If both are set, api/main.py gates every request (except /health) behind
+# HTTP Basic Auth. Leave unset for local dev; set both in production.
 
-CLAUDE_MODEL = "claude-sonnet-5"
+APP_USERNAME = os.getenv("APP_USERNAME")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# --- Cache backend --------------------------------------------------------
+# When set (e.g. Render Key Value internal URL), cache.py uses Redis.
+# When unset, it falls back to a local SQLite file under CACHE_DIR.
+
+REDIS_URL = os.getenv("REDIS_URL")
 
 
 def cache_dir_path() -> Path:

@@ -74,13 +74,11 @@ def test_live_pipeline_94404_smoke():
 
     This is the critical integration checkpoint: it exercises location
     resolution, both live data-source fetches, both enrichment steps, the
-    reconcile node (LLM path if ANTHROPIC_API_KEY is set, deterministic
-    fallback otherwise), and ranking -- all against real network calls.
+    (naive, deterministic) reconcile/dedup node, and ranking -- all against
+    real network calls.
 
     Skips (does not fail) on any network-related error, since CI/sandboxes
-    may not have outbound access. If ANTHROPIC_API_KEY isn't set in this
-    environment, that's expected and fine -- the graceful-fallback
-    reconcile path should still produce a valid, non-crashing result.
+    may not have outbound access.
     """
     try:
         results = pipeline.run("94404", radius_miles=15)

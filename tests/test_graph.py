@@ -4,17 +4,17 @@ These are all deterministic / no-network / no-LLM tests:
 - `rank` sort order (None ratings sink below rated facilities; distance
   tiebreaks).
 - The ACO name-matching helper (care_facilities.aco_match).
-- The `reconcile` node's graceful-degradation fallback path, both when
-  ANTHROPIC_API_KEY is unset and when the Anthropic call itself raises.
+- The `reconcile` node's naive, deterministic dedup (fuzzy name + matching
+  ZIP, no LLM/network call involved).
 
-The one live/networked/LLM end-to-end test lives in tests/test_pipeline.py.
+The one live/networked end-to-end test lives in tests/test_pipeline.py.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from care_facilities import aco_match, config as config_module
+from care_facilities import aco_match
 from care_facilities import graph
 from care_facilities.schema import Facility
 
@@ -136,7 +136,7 @@ def test_aco_matcher_empty_dataset():
     assert matcher.match("Anything At All") is None
 
 
-# --- reconcile: graceful degradation --------------------------------------
+# --- reconcile: naive dedup -------------------------------------------------
 
 
 def _snf_dict(**overrides) -> dict:
@@ -186,10 +186,7 @@ def _alf_dict(**overrides) -> dict:
     return base
 
 
-def test_reconcile_fallback_when_api_key_unset(monkeypatch):
-    monkeypatch.setattr(config_module, "ANTHROPIC_API_KEY", None)
-    monkeypatch.setattr(graph.config, "ANTHROPIC_API_KEY", None)
-
+def test_reconcile_keeps_distinct_facilities_separate():
     state = {
         "snf_enriched": [_snf_dict()],
         "alf_enriched": [_alf_dict()],
@@ -201,55 +198,61 @@ def test_reconcile_fallback_when_api_key_unset(monkeypatch):
     assert len(facilities) == 2
     types = {f.facility_type for f in facilities}
     assert types == {"SNF", "Assisted Living"}
-    assert any("ANTHROPIC_API_KEY not set" in e for e in result["errors"])
+    assert result["errors"] == []
 
-    # Honesty guardrail holds even without any LLM step.
+    # Honesty guardrail holds with the naive dedup path too.
     alf = next(f for f in facilities if f.facility_type == "Assisted Living")
     assert alf.cms_overall_rating is None
     assert alf.affiliated_aco is None
 
 
-class _RaisingChatAnthropic:
-    """Stand-in for ChatAnthropic that always raises, simulating a network
-    failure / API error during the LLM reconcile call."""
-
-    def __init__(self, *args, **kwargs):
-        raise RuntimeError("simulated Anthropic API failure")
-
-
-def test_reconcile_fallback_when_llm_call_raises(monkeypatch):
-    # Pretend a key IS set, so we exercise the try/except around the actual
-    # LLM call rather than the "no key" short-circuit.
-    monkeypatch.setattr(graph.config, "ANTHROPIC_API_KEY", "fake-key-for-test")
-    monkeypatch.setattr(graph, "ChatAnthropic", _RaisingChatAnthropic)
-
+def test_reconcile_merges_same_name_and_zip_across_sources():
+    # Same ZIP, near-identical name (corp suffix stripped by normalize_name)
+    # -> a continuing-care community that shows up once in CMS (SNF) and
+    # once in NPPES (ALF); should merge, keeping the SNF entry (it carries
+    # CMS ratings/ownership).
     state = {
-        "snf_enriched": [_snf_dict()],
-        "alf_enriched": [_alf_dict()],
+        "snf_enriched": [_snf_dict(name="Sunnyvale Manor", zip="90001")],
+        "alf_enriched": [_alf_dict(name="Sunnyvale Manor LLC", zip="90001")],
         "errors": [],
     }
     result = graph.reconcile(state)
-
     facilities = result["facilities"]
-    assert len(facilities) == 2
-    assert any("LLM reconciliation failed" in e for e in result["errors"])
-
-    alf = next(f for f in facilities if f.facility_type == "Assisted Living")
-    assert alf.cms_overall_rating is None
-    assert alf.affiliated_aco is None
+    assert len(facilities) == 1
+    assert facilities[0].facility_type == "SNF"
 
 
-def test_reconcile_apply_result_dedup_and_cleanup():
-    facilities = [
-        Facility.from_snf_dict(_snf_dict(name="Sunnyvale Manor")),
-        Facility.from_alf_dict(_alf_dict(name="Sunnyvale Manor - ALF Wing")),
-    ]
-    result = graph.ReconcileResult(
-        duplicate_groups=[graph.DuplicateGroup(indices=[0, 1], keep_index=0)],
-        cleaned=[graph.CleanedFacility(index=0, leadership="Cleaned Leadership String")],
+def test_reconcile_does_not_merge_same_name_different_zip():
+    state = {
+        "snf_enriched": [_snf_dict(name="Golden Manor", zip="90001")],
+        "alf_enriched": [_alf_dict(name="Golden Manor", zip="90099")],
+        "errors": [],
+    }
+    result = graph.reconcile(state)
+    assert len(result["facilities"]) == 2
+
+
+def test_reconcile_does_not_merge_different_names_same_zip():
+    state = {
+        "snf_enriched": [_snf_dict(name="Golden Manor", zip="90001")],
+        "alf_enriched": [_alf_dict(name="Completely Different Facility", zip="90001")],
+        "errors": [],
+    }
+    result = graph.reconcile(state)
+    assert len(result["facilities"]) == 2
+
+
+def test_dedupe_facilities_prefers_more_complete_entry_within_same_type():
+    sparse = Facility.from_snf_dict(
+        _snf_dict(name="Golden Manor", zip="90001", ownership=[], chain_name=None)
     )
-    merged = graph._apply_reconcile_result(facilities, result)
-    assert len(merged) == 1
-    assert merged[0].leadership == "Cleaned Leadership String"
-    # Guardrail: cleanup never touches rating/ACO fields.
-    assert merged[0].cms_overall_rating == 4
+    complete = Facility.from_snf_dict(
+        _snf_dict(
+            name="Golden Manor",
+            zip="90001",
+            ownership=[{"owner_name": "Jane Doe", "role": "Administrator"}],
+        )
+    )
+    deduped = graph._dedupe_facilities([sparse, complete])
+    assert len(deduped) == 1
+    assert deduped[0].leadership is not None

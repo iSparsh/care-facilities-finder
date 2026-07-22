@@ -9,9 +9,9 @@ enriched with:
 - Facility leadership / ownership info
 
 The pipeline is orchestrated with [LangGraph](https://github.com/langchain-ai/langgraph)
-and uses Claude (via `langchain-anthropic`) to reconcile and summarize data
-pulled from multiple public sources (CMS Care Compare, NPPES, US Census
-Geocoder).
+and pulls data from public sources (CMS Care Compare, NPPES, US Census
+Geocoder). Duplicate SNF/ALF entries are merged with a deterministic
+fuzzy-name + ZIP match — no LLM required.
 
 ## Status
 
@@ -35,17 +35,10 @@ Geocoder).
 # from the repository root
 pip install -e ".[dev]"
 
-# configure your Anthropic API key
 cp .env.example .env
-# then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+# Optional for local use. Leave APP_USERNAME / APP_PASSWORD unset to run
+# without a login prompt. Set both to exercise Basic Auth locally.
 ```
-
-`ANTHROPIC_API_KEY` enables the LLM-based reconciliation step in the
-pipeline (deduping facilities that appear in both the CMS and NPPES source
-data, and lightly cleaning up display strings). If it's unset, the system
-still works fully via a deterministic fallback merge (plain concatenation
-of SNF + ALF results, no dedup/cleanup) -- this is a documented,
-intentional Stage 3 fallback, not an error state.
 
 ## Running the web app
 
@@ -67,6 +60,34 @@ uncached ALF addresses can take several minutes, since each address is
 geocoded individually (and then cached for next time -- repeat searches in
 the same state get progressively faster). The UI's loading state says this
 up front rather than looking hung.
+
+## Deploying on Render (public link + Basic Auth)
+
+Credentials never go in the GitHub repo. They live only as environment
+variables on Render.
+
+1. Push this repo to GitHub (public is fine).
+2. In [Render](https://render.com), **New → Blueprint** and point it at the
+   repo (uses `render.yaml`), **or** **New → Web Service** and select
+   Docker.
+3. In the service **Environment** tab, set:
+   - `APP_USERNAME` — pick a username for your one user
+   - `APP_PASSWORD` — a strong password
+   (`REDIS_URL` is set automatically from the Key Value instance in
+   `render.yaml`; you do not paste it yourself.)
+4. Deploy. Render gives you an `https://….onrender.com` URL.
+5. Share that URL with your user, and send the username/password **separately**
+   (text/email) — not inside the URL.
+
+When both env vars are set, the browser prompts for login on every page
+except `/health`. `/search` is also rate-limited (20 requests/hour per IP).
+
+**Caveat:** cold searches can take a long time (geocoding). Render free
+instances sleep after inactivity and have relatively short HTTP timeouts, so
+the first search after a sleep may need a retry. The free Redis-compatible
+Key Value cache survives web-service sleep cycles (unlike the local disk
+cache), so repeat searches warm up much faster. A paid starter web instance
+is more reliable if timeouts become annoying.
 
 ## Running tests
 
