@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "care_facilities"
+version = "0.1.0"
+description = "Zipcode -> ranked elder-care facility table, orchestrated via LangGraph + Claude."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langchain-anthropic",
+    "langchain-core",
+    "httpx",
+    "pgeocode",
+    "pandas",
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/care_facilities"]

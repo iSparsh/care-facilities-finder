@@ -1,0 +1,922 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Care Facilities Finder</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --text: #1c2128;
+      --muted: #5b6472;
+      --border: #d9dee4;
+      --accent: #2563eb;
+      --accent-contrast: #ffffff;
+      --zebra: #f1f4f8;
+      --error-bg: #fdecec;
+      --error-border: #e5484d;
+      --error-text: #7d2020;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14161a;
+        --panel: #1d2025;
+        --text: #e7e9ec;
+        --muted: #9aa4b2;
+        --border: #33383f;
+        --accent: #5b8def;
+        --accent-contrast: #0c1116;
+        --zebra: #24272d;
+        --error-bg: #3a1f21;
+        --error-border: #e5484d;
+        --error-text: #ffb4b4;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.4;
+    }
+
+    header {
+      padding: 1.5rem 2rem 1rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header h1 {
+      margin: 0 0 0.25rem;
+      font-size: 1.6rem;
+    }
+
+    header p.subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 2rem 3rem;
+    }
+
+    form#search-form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: flex-end;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .field label {
+      font-size: 0.85rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .field input {
+      font-size: 1rem;
+      padding: 0.5rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      min-width: 140px;
+    }
+
+    .field input:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    button#search-btn {
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 0.6rem 1.4rem;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--accent-contrast);
+      cursor: pointer;
+      height: fit-content;
+    }
+
+    button#search-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.85rem;
+      flex-basis: 100%;
+      margin-top: -0.5rem;
+    }
+
+    #status {
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+
+    #status.loading {
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .spinner {
+      width: 1rem;
+      height: 1rem;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #status.error {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      color: var(--error-text);
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+    }
+
+    #status.empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    #results-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.88rem;
+      min-width: 1100px;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      text-align: left;
+      padding: 0.6rem 0.7rem;
+      border-bottom: 2px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    thead th:focus-visible,
+    thead th:hover {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    thead th .arrow {
+      color: var(--accent);
+      margin-left: 0.25rem;
+    }
+
+    tbody td {
+      padding: 0.55rem 0.7rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tbody tr:nth-child(even) {
+      background: var(--zebra);
+    }
+
+    .na {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .rating-stars {
+      letter-spacing: 1px;
+      color: #d4a017;
+    }
+
+    #filter-bar {
+      display: none;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: flex-end;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    #filter-bar .field input,
+    #filter-bar .field select {
+      font-size: 0.95rem;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      min-width: 140px;
+    }
+
+    #filter-bar .field input:focus,
+    #filter-bar .field select:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    #filter-bar .field-hint {
+      color: var(--muted);
+      font-size: 0.75rem;
+      max-width: 160px;
+      line-height: 1.25;
+    }
+
+    button#reset-filters-btn {
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.5rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+      height: fit-content;
+    }
+
+    button#reset-filters-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    #filter-count {
+      color: var(--muted);
+      font-size: 0.85rem;
+      flex-basis: 100%;
+    }
+
+    #no-results-message {
+      display: none;
+      color: var(--muted);
+      font-style: italic;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      text-align: center;
+    }
+
+    /* Collapsible leadership cell */
+    td details summary {
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 600;
+      list-style: none;
+    }
+
+    td details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    td details summary::marker {
+      content: "";
+    }
+
+    td details summary::before {
+      content: "▸";
+      display: inline-block;
+      margin-right: 0.3rem;
+      transition: transform 0.15s ease;
+    }
+
+    td details[open] summary::before {
+      transform: rotate(90deg);
+    }
+
+    td .leadership-detail {
+      margin-top: 0.35rem;
+      white-space: pre-wrap;
+      color: var(--text);
+      font-size: 0.85rem;
+    }
+
+    /* CMS rating info popover */
+    .cms-na-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .info-btn {
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 0.95rem;
+      padding: 0 0.15rem;
+      line-height: 1;
+      border-radius: 4px;
+    }
+
+    .info-btn:hover,
+    .info-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .popover {
+      position: absolute;
+      top: 1.5rem;
+      left: 0;
+      z-index: 30;
+      width: max-content;
+      max-width: 280px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem 0.75rem;
+      font-size: 0.8rem;
+      font-style: normal;
+      font-weight: normal;
+      color: var(--text);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    }
+
+    footer {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 2rem 2rem;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Care Facilities Finder</h1>
+    <p class="subtitle">Find nearby nursing homes and assisted living communities, ranked by CMS quality rating and distance.</p>
+  </header>
+
+  <main>
+    <form id="search-form">
+      <div class="field">
+        <label for="zipcode">Zip code</label>
+        <input
+          type="text"
+          id="zipcode"
+          name="zipcode"
+          inputmode="numeric"
+          pattern="\d{5}"
+          maxlength="5"
+          placeholder="e.g. 94404"
+          required
+        />
+      </div>
+      <div class="field">
+        <label for="radius">Radius (miles)</label>
+        <input
+          type="number"
+          id="radius"
+          name="radius"
+          min="1"
+          max="200"
+          step="1"
+          value="25"
+        />
+      </div>
+      <button type="submit" id="search-btn">Search</button>
+      <div class="hint">
+        First-time searches in a new area can take several minutes (assisted-living
+        addresses are geocoded one at a time and cached for next time). Repeat
+        searches in the same state are much faster.
+      </div>
+    </form>
+
+    <div id="status"></div>
+
+    <div id="filter-bar">
+      <div class="field">
+        <label for="filter-text">Search</label>
+        <input
+          type="text"
+          id="filter-text"
+          placeholder="Name, address, city, chain, leadership..."
+        />
+      </div>
+      <div class="field">
+        <label for="filter-type">Facility type</label>
+        <select id="filter-type">
+          <option value="">All</option>
+          <option value="SNF">SNF</option>
+          <option value="Assisted Living">Assisted Living</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="filter-rating">Min CMS rating</label>
+        <select id="filter-rating">
+          <option value="">Any</option>
+          <option value="1">1+</option>
+          <option value="2">2+</option>
+          <option value="3">3+</option>
+          <option value="4">4+</option>
+          <option value="5">5</option>
+        </select>
+        <span class="field-hint">Excludes facilities without a rating</span>
+      </div>
+      <div class="field">
+        <label for="filter-distance">Max distance (mi)</label>
+        <input type="number" id="filter-distance" min="0" step="0.1" placeholder="Any" />
+      </div>
+      <button type="button" id="reset-filters-btn">Reset filters</button>
+      <div id="filter-count"></div>
+    </div>
+
+    <div id="no-results-message">No facilities match your filters.</div>
+
+    <div id="results-wrap" style="display: none;">
+      <table id="results-table">
+        <thead>
+          <tr id="header-row"></tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <footer>
+    Data sources: CMS Provider Data (skilled nursing facilities), NPPES NPI Registry
+    (assisted living), US Census Geocoder, Stengel assisted-living bed-count dataset.
+    Assisted Living facilities have no federal CMS star rating or ACO affiliation --
+    this is a structural fact about US elder-care data, shown here as "N/A", never
+    fabricated.
+  </footer>
+
+  <script>
+    const COLUMNS = [
+      { key: "name", label: "Name" },
+      { key: "facility_type", label: "Type" },
+      { key: "address_combined", label: "Address" },
+      { key: "distance_mi", label: "Distance (mi)", numeric: true },
+      { key: "cms_overall_rating", label: "CMS Rating" },
+      { key: "health_inspection_rating", label: "Health Inspection" },
+      { key: "staffing_rating", label: "Staffing" },
+      { key: "qm_rating", label: "QM" },
+      { key: "certified_beds", label: "Beds", numeric: true },
+      { key: "ownership_combined", label: "Ownership / Chain" },
+      { key: "affiliated_aco", label: "Affiliated ACO" },
+      { key: "leadership", label: "Leadership" },
+      { key: "phone", label: "Phone" },
+      { key: "data_source", label: "Source" },
+    ];
+
+    let currentResults = [];
+    let currentSort = { key: null, dir: 1 };
+    let filterState = { text: "", type: "", minRating: "", maxDistance: "" };
+
+    const CMS_RATING_REASONS = {
+      "Assisted Living":
+        "Assisted living facilities are licensed and regulated by individual state agencies, not certified by Medicare/Medicaid. CMS's Five-Star Quality Rating System only rates facilities it certifies — primarily skilled nursing facilities — so there is no federal CMS rating for assisted living. This is a structural fact about how the U.S. regulates senior housing, not missing data.",
+      SNF:
+        "This nursing home does not currently have a published CMS Five-Star overall rating. CMS withholds an overall rating for facilities with insufficient inspection, staffing, or quality-measure data to compute one reliably — for example, newly certified facilities or those with a recent change in ownership or certification. Check back after CMS's next data refresh.",
+    };
+
+    const form = document.getElementById("search-form");
+    const statusEl = document.getElementById("status");
+    const resultsWrap = document.getElementById("results-wrap");
+    const headerRow = document.getElementById("header-row");
+    const resultsBody = document.getElementById("results-body");
+    const searchBtn = document.getElementById("search-btn");
+    const filterBar = document.getElementById("filter-bar");
+    const filterTextInput = document.getElementById("filter-text");
+    const filterTypeSelect = document.getElementById("filter-type");
+    const filterRatingSelect = document.getElementById("filter-rating");
+    const filterDistanceInput = document.getElementById("filter-distance");
+    const resetFiltersBtn = document.getElementById("reset-filters-btn");
+    const filterCountEl = document.getElementById("filter-count");
+    const noResultsMessage = document.getElementById("no-results-message");
+
+    function naOr(value) {
+      return value === null || value === undefined || value === ""
+        ? '<span class="na">N/A</span>'
+        : escapeHtml(String(value));
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement("div");
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function starRating(value) {
+      if (value === null || value === undefined) {
+        return '<span class="na">N/A</span>';
+      }
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 1 || n > 5) {
+        return '<span class="na">N/A</span>';
+      }
+      const stars = "★".repeat(n) + "☆".repeat(5 - n);
+      return `<span class="rating-stars" title="${n}/5">${stars}</span> <span>(${n})</span>`;
+    }
+
+    let popoverCounter = 0;
+
+    function cmsRatingCell(f) {
+      if (f.cms_overall_rating !== null && f.cms_overall_rating !== undefined) {
+        return starRating(f.cms_overall_rating);
+      }
+      const reason =
+        CMS_RATING_REASONS[f.facility_type] || CMS_RATING_REASONS.SNF;
+      popoverCounter += 1;
+      const popoverId = `cms-info-${popoverCounter}`;
+      return (
+        '<span class="cms-na-wrap">' +
+        '<span class="na">N/A</span>' +
+        `<button type="button" class="info-btn" data-popover-target="${popoverId}" aria-expanded="false" aria-label="Why is there no CMS rating?">&#9432;</button>` +
+        `<span class="popover" id="${popoverId}" role="tooltip" hidden>${escapeHtml(reason)}</span>` +
+        "</span>"
+      );
+    }
+
+    function leadershipCell(value) {
+      if (value === null || value === undefined || value === "") {
+        return '<span class="na">N/A</span>';
+      }
+      return (
+        "<details><summary>Leadership</summary>" +
+        `<div class="leadership-detail">${escapeHtml(String(value))}</div>` +
+        "</details>"
+      );
+    }
+
+    function closeAllPopovers() {
+      document
+        .querySelectorAll(".popover")
+        .forEach((p) => {
+          p.hidden = true;
+        });
+      document
+        .querySelectorAll(".info-btn")
+        .forEach((b) => b.setAttribute("aria-expanded", "false"));
+    }
+
+    resultsBody.addEventListener("click", (e) => {
+      const btn = e.target.closest(".info-btn");
+      if (!btn) return;
+      e.stopPropagation();
+      const popover = document.getElementById(btn.dataset.popoverTarget);
+      if (!popover) return;
+      const wasOpen = !popover.hidden;
+      closeAllPopovers();
+      if (!wasOpen) {
+        popover.hidden = false;
+        btn.setAttribute("aria-expanded", "true");
+      }
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".cms-na-wrap")) {
+        closeAllPopovers();
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        closeAllPopovers();
+      }
+    });
+
+    function combinedAddress(f) {
+      const parts = [f.address, f.city, f.state, f.zip].filter(Boolean);
+      return parts.join(", ");
+    }
+
+    function combinedOwnership(f) {
+      const parts = [];
+      if (f.ownership_type) parts.push(f.ownership_type);
+      if (f.chain_name) parts.push(f.chain_name);
+      return parts.length ? parts.join(" / ") : null;
+    }
+
+    function derivedRow(f) {
+      return {
+        ...f,
+        address_combined: combinedAddress(f),
+        ownership_combined: combinedOwnership(f),
+      };
+    }
+
+    function renderHeader() {
+      headerRow.innerHTML = "";
+      for (const col of COLUMNS) {
+        const th = document.createElement("th");
+        th.tabIndex = 0;
+        th.dataset.key = col.key;
+        th.textContent = col.label;
+        if (currentSort.key === col.key) {
+          const arrow = document.createElement("span");
+          arrow.className = "arrow";
+          arrow.textContent = currentSort.dir === 1 ? "▲" : "▼";
+          th.appendChild(arrow);
+        }
+        const activate = () => onSort(col.key);
+        th.addEventListener("click", activate);
+        th.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            activate();
+          }
+        });
+        headerRow.appendChild(th);
+      }
+    }
+
+    function onSort(key) {
+      if (currentSort.key === key) {
+        currentSort.dir *= -1;
+      } else {
+        currentSort = { key, dir: 1 };
+      }
+      renderHeader();
+      renderAll();
+    }
+
+    function applyFilters(rows) {
+      const text = filterState.text.trim().toLowerCase();
+      const type = filterState.type;
+      const minRating =
+        filterState.minRating !== "" ? Number(filterState.minRating) : null;
+      const maxDistance =
+        filterState.maxDistance !== "" && filterState.maxDistance !== null
+          ? Number(filterState.maxDistance)
+          : null;
+
+      return rows.filter((f) => {
+        if (text) {
+          const haystack = [f.name, f.address, f.city, f.chain_name, f.leadership]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          if (!haystack.includes(text)) return false;
+        }
+        if (type && f.facility_type !== type) return false;
+        if (minRating !== null) {
+          if (
+            f.cms_overall_rating === null ||
+            f.cms_overall_rating === undefined ||
+            Number(f.cms_overall_rating) < minRating
+          ) {
+            return false;
+          }
+        }
+        if (maxDistance !== null) {
+          if (
+            f.distance_mi === null ||
+            f.distance_mi === undefined ||
+            Number(f.distance_mi) > maxDistance
+          ) {
+            return false;
+          }
+        }
+        return true;
+      });
+    }
+
+    function sortRows(rows) {
+      if (!currentSort.key) return rows;
+      const { key, dir } = currentSort;
+      return rows.slice().sort((a, b) => {
+        let av = a[key];
+        let bv = b[key];
+        const aMissing = av === null || av === undefined || av === "";
+        const bMissing = bv === null || bv === undefined || bv === "";
+        if (aMissing && bMissing) return 0;
+        if (aMissing) return 1; // missing/N-A always sinks to the bottom
+        if (bMissing) return -1;
+        if (typeof av === "number" && typeof bv === "number") {
+          return (av - bv) * dir;
+        }
+        av = String(av).toLowerCase();
+        bv = String(bv).toLowerCase();
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+      });
+    }
+
+    function visibleRows() {
+      const base = currentResults.map(derivedRow);
+      return sortRows(applyFilters(base));
+    }
+
+    function updateFilterCount(visibleCount, totalCount) {
+      filterCountEl.textContent = `Showing ${visibleCount} of ${totalCount} facilit${
+        totalCount === 1 ? "y" : "ies"
+      }.`;
+    }
+
+    function renderAll() {
+      if (!currentResults.length) {
+        filterBar.style.display = "none";
+        noResultsMessage.style.display = "none";
+        resultsWrap.style.display = "none";
+        return;
+      }
+
+      filterBar.style.display = "flex";
+      const rows = visibleRows();
+      updateFilterCount(rows.length, currentResults.length);
+
+      if (!rows.length) {
+        resultsWrap.style.display = "none";
+        noResultsMessage.style.display = "block";
+        return;
+      }
+
+      noResultsMessage.style.display = "none";
+      resultsWrap.style.display = "block";
+      renderRows(rows);
+    }
+
+    function renderRows(rows) {
+      resultsBody.innerHTML = "";
+      for (const f of rows) {
+        const tr = document.createElement("tr");
+        const cells = [
+          escapeHtml(f.name || ""),
+          escapeHtml(f.facility_type || ""),
+          escapeHtml(f.address_combined || ""),
+          f.distance_mi !== null && f.distance_mi !== undefined
+            ? Number(f.distance_mi).toFixed(1)
+            : '<span class="na">N/A</span>',
+          cmsRatingCell(f),
+          naOr(f.health_inspection_rating),
+          naOr(f.staffing_rating),
+          naOr(f.qm_rating),
+          naOr(f.certified_beds),
+          naOr(f.ownership_combined),
+          naOr(f.affiliated_aco),
+          leadershipCell(f.leadership),
+          naOr(f.phone),
+          escapeHtml(f.data_source || ""),
+        ];
+        tr.innerHTML = cells.map((c) => `<td>${c}</td>`).join("");
+        resultsBody.appendChild(tr);
+      }
+    }
+
+    function setStatus(message, cls) {
+      statusEl.className = cls || "";
+      statusEl.innerHTML = message;
+    }
+
+    function resetFilters() {
+      filterState = { text: "", type: "", minRating: "", maxDistance: "" };
+      filterTextInput.value = "";
+      filterTypeSelect.value = "";
+      filterRatingSelect.value = "";
+      filterDistanceInput.value = "";
+    }
+
+    function showResults(results) {
+      currentResults = results;
+      currentSort = { key: null, dir: 1 };
+      resetFilters();
+      renderHeader();
+      if (!results.length) {
+        filterBar.style.display = "none";
+        noResultsMessage.style.display = "none";
+        resultsWrap.style.display = "none";
+        setStatus("No facilities found for that search. Try a larger radius.", "empty");
+        return;
+      }
+      setStatus(`${results.length} facilit${results.length === 1 ? "y" : "ies"} found.`, "");
+      renderAll();
+    }
+
+    filterTextInput.addEventListener("input", () => {
+      filterState.text = filterTextInput.value;
+      renderAll();
+    });
+
+    filterTypeSelect.addEventListener("change", () => {
+      filterState.type = filterTypeSelect.value;
+      renderAll();
+    });
+
+    filterRatingSelect.addEventListener("change", () => {
+      filterState.minRating = filterRatingSelect.value;
+      renderAll();
+    });
+
+    filterDistanceInput.addEventListener("input", () => {
+      filterState.maxDistance = filterDistanceInput.value;
+      renderAll();
+    });
+
+    resetFiltersBtn.addEventListener("click", () => {
+      resetFilters();
+      renderAll();
+    });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const zipcode = document.getElementById("zipcode").value.trim();
+      const radiusRaw = document.getElementById("radius").value;
+      const radius = radiusRaw ? Number(radiusRaw) : null;
+
+      if (!/^\d{5}$/.test(zipcode)) {
+        setStatus("Please enter a valid 5-digit zip code.", "error");
+        return;
+      }
+
+      searchBtn.disabled = true;
+      resultsWrap.style.display = "none";
+      setStatus(
+        '<span class="spinner"></span> Searching... this may take a while on a cold cache (assisted-living geocoding can take minutes the first time in a new area).',
+        "loading"
+      );
+
+      try {
+        const resp = await fetch("/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ zipcode, radius_miles: radius }),
+        });
+
+        let body;
+        try {
+          body = await resp.json();
+        } catch (parseErr) {
+          throw new Error(`Server returned an unreadable response (HTTP ${resp.status}).`);
+        }
+
+        if (!resp.ok) {
+          const detail =
+            (body && body.detail && (Array.isArray(body.detail)
+              ? body.detail.map((d) => d.msg).join("; ")
+              : String(body.detail))) ||
+            `HTTP ${resp.status}`;
+          throw new Error(detail);
+        }
+
+        if (body.errors && body.errors.length) {
+          // Pipeline-level errors (e.g. search failed): show them, but still
+          // render whatever results (possibly none) came back.
+          setStatus(escapeHtml(body.errors.join(" ")), "error");
+          if (body.results && body.results.length) {
+            showResults(body.results);
+          } else {
+            currentResults = [];
+            renderAll();
+          }
+          return;
+        }
+
+        showResults(body.results || []);
+      } catch (err) {
+        resultsWrap.style.display = "none";
+        setStatus(
+          `Something went wrong: ${escapeHtml(err.message || String(err))}`,
+          "error"
+        );
+      } finally {
+        searchBtn.disabled = false;
+      }
+    });
+
+    renderHeader();
+  </script>
+</body>
+</html>
